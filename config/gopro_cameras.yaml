@@ -1,0 +1,20 @@
+gopro_cameras:
+  ros__parameters:
+    target_fps: 15
+    use_hw_decode: true
+    use_webcam_api: true       # true = webcam API (H.264 1080p), false = preview stream (H.265 1440p)
+    keepalive_interval_s: 2.0
+    reconnect_delay_s: 3.0
+    webcam_port_base: 8554     # webcam stream port (camera_1 gets +2)
+
+    camera_0:
+      name: "gopro_front"
+      ip: "172.22.152.51"
+      serial: "C3531350017152"
+      udp_port: 8554
+
+    camera_1:
+      name: "gopro_back"
+      ip: "172.21.106.51"
+      serial: "C3531350027106"
+      udp_port: 8556
