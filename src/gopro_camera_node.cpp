@@ -138,9 +138,12 @@ private:
             auto stream_mgr = std::make_unique<GoProStreamManager>(
                 cfg, keepalive_s_, log_info, log_warn);
 
+            auto qos = rclcpp::QoS(5)
+                .reliability(rclcpp::ReliabilityPolicy::Reliable)
+                .durability(rclcpp::DurabilityPolicy::Volatile);
             auto publisher = create_publisher<sensor_msgs::msg::Image>(
                 "/gopro/camera_" + std::to_string(i) + "/image_raw",
-                rclcpp::SensorDataQoS());
+                qos);
 
             auto handle = std::make_unique<CameraHandle>();
             handle->config = cfg;
