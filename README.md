@@ -362,4 +362,3 @@ MIT License — see [LICENSE](LICENSE) for details.
 
 - [Open GoPro](https://github.com/gopro/OpenGoPro) — GoPro HTTP API documentation
 - [gopro_as_webcam_on_linux](https://github.com/jschmid1/gopro_as_webcam_on_linux) — Community Linux GoPro streaming
-- [FAST-LIVO2](https://github.com/hku-mars/FAST-LIVO2) — Colorization algorithm reference
