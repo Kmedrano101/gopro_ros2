@@ -12,7 +12,7 @@
 
 <br/>
 
-Streams video from multiple GoPro cameras connected via **USB-C** and publishes `sensor_msgs/Image` topics at up to **~15 Hz** using GStreamer with **NVIDIA NVDEC** hardware-accelerated **H.265 (HEVC)** decode.
+Streams video from multiple GoPro cameras connected via **USB-C** and publishes image topics at up to **~15 Hz** using GStreamer with **NVIDIA NVDEC** hardware-accelerated **H.265 (HEVC)** decode. Supports both **JPEG-compressed** (`sensor_msgs/CompressedImage`, default) and **raw** (`sensor_msgs/Image`) output modes.
 
 </div>
 
@@ -27,6 +27,7 @@ Streams video from multiple GoPro cameras connected via **USB-C** and publishes 
 - **♻️ Auto-reconnect** — re-initializes stream and GStreamer pipeline on connection loss
 - **💓 Keepalive** — background thread pings the camera HTTP API to prevent stream timeout
 - **🎯 Webcam API with fallback** — tries the Webcam API (H.264/1080p) first, falls back to Preview Stream (H.265) automatically
+- **🗜️ Compressed or raw output** — publishes JPEG `CompressedImage` (~200 KB/frame) by default, or raw `Image` (~6 MB/frame) for zero-latency pipelines
 - **📊 Built-in Hz monitoring** — logs per-camera publish rate every 5 seconds for live performance tracking
 
 ## 📐 Architecture
@@ -36,13 +37,13 @@ Streams video from multiple GoPro cameras connected via **USB-C** and publishes 
 │  GoPro #1    │◄──(NCM)──► │  gopro_camera_node                          │
 │  172.2X.51   │            │                                              │
 └──────────────┘   HTTP     │  ┌─────────────┐    ┌─────────────────────┐ │
-                   8080     │  │ Stream Mgr  │───►│ Reader Thread #1    │ │
-┌──────────────┐            │  │ (libcurl)   │    │ GStreamer → OpenCV  │──►  /gopro/camera_0/image_raw
-│  GoPro #2    │◄──(NCM)──► │  │ start/stop  │    │ nvv4l2decoder (HW)  │ │
+                   8080     │  │ Stream Mgr  │───►│ Reader Thread #1    │ │  use_compressed: true (default)
+┌──────────────┐            │  │ (libcurl)   │    │ GStreamer → OpenCV  │──►  .../camera_0/image_raw/compressed
+│  GoPro #2    │◄──(NCM)──► │  │ start/stop  │    │ nvv4l2decoder (HW)  │──►  .../camera_0/image_raw  (if false)
 │  172.2Y.51   │            │  │ keepalive   │    └─────────────────────┘ │
 └──────────────┘            │  └─────────────┘    ┌─────────────────────┐ │
-                            │                     │ Reader Thread #2    │──►  /gopro/camera_1/image_raw
-                            │                     │ GStreamer → OpenCV  │ │
+                            │                     │ Reader Thread #2    │──►  .../camera_1/image_raw/compressed
+                            │                     │ GStreamer → OpenCV  │──►  .../camera_1/image_raw  (if false)
                             │                     │ nvv4l2decoder (HW)  │ │
                             │                     └─────────────────────┘ │
                             └──────────────────────────────────────────────┘
@@ -172,8 +173,8 @@ ros2 topic list | grep gopro
 #   [gopro_back]  publish rate: 15.0 Hz (total: 1500 frames)
 
 # You can also measure externally:
-ros2 topic hz /gopro/camera_0/image_raw
-ros2 topic hz /gopro/camera_1/image_raw
+ros2 topic hz /gopro/camera_0/image_raw/compressed
+ros2 topic hz /gopro/camera_1/image_raw/compressed
 
 # View in RViz
 rviz2 -d $(ros2 pkg prefix gopro_ros2)/share/gopro_ros2/rviz/gopro_cameras.rviz
@@ -190,6 +191,8 @@ gopro_cameras:
     use_hw_decode: true         # Use nvv4l2decoder (Jetson HW accel)
     use_webcam_api: true        # Try Webcam API first (H.264), fallback to Preview (H.265)
     webcam_resolution: 12       # Webcam API resolution: 4=480p, 7=720p, 12=1080p
+    use_compressed: true        # true = CompressedImage (JPEG), false = raw Image (BGR8)
+    jpeg_quality: 80            # JPEG quality 1-100 (only when use_compressed: true)
     keepalive_interval_s: 2.0   # HTTP keepalive ping interval
     reconnect_delay_s: 3.0      # Wait before reconnecting after failure
 
@@ -214,17 +217,28 @@ gopro_cameras:
 | `use_hw_decode` | bool | true | Use NVIDIA HW decoder (falls back to SW) |
 | `use_webcam_api` | bool | true | Try Webcam API before Preview Stream |
 | `webcam_resolution` | int | 12 | Webcam API resolution (`4`=480p, `7`=720p, `12`=1080p) |
+| `use_compressed` | bool | true | `true` = JPEG `CompressedImage` (~200 KB/frame), `false` = raw `Image` (~6 MB/frame) |
+| `jpeg_quality` | int | 80 | JPEG quality 1–100 (only used when `use_compressed: true`) |
 | `keepalive_interval_s` | double | 2.0 | Keepalive HTTP request interval |
 | `reconnect_delay_s` | double | 3.0 | Delay before reconnection attempt |
 
 ### Published Topics
+
+When `use_compressed: true` (default):
+
+| Topic | Type | Description |
+|---|---|---|
+| `/gopro/camera_0/image_raw/compressed` | `sensor_msgs/CompressedImage` (JPEG) | First camera frames |
+| `/gopro/camera_1/image_raw/compressed` | `sensor_msgs/CompressedImage` (JPEG) | Second camera frames |
+
+When `use_compressed: false`:
 
 | Topic | Type | Description |
 |---|---|---|
 | `/gopro/camera_0/image_raw` | `sensor_msgs/Image` (BGR8) | First camera frames |
 | `/gopro/camera_1/image_raw` | `sensor_msgs/Image` (BGR8) | Second camera frames |
 
-> Topic naming follows the pattern `/gopro/camera_{N}/image_raw` where N is the camera index.
+> Compressed mode reduces per-frame size from ~6 MB to ~200 KB (~30x), making it suitable for rosbag recording and network transport. Use raw mode for pipelines that need direct pixel access without decode overhead.
 
 ## 📊 Performance
 

@@ -5,7 +5,8 @@ gopro_cameras:
     use_webcam_api: true       # true = webcam API (H.264 1080p), false = preview stream (H.265 1440p)
     webcam_resolution: 12     # webcam API res: 4=480p, 7=720p, 12=1080p
     keepalive_interval_s: 2.0
-    jpeg_quality: 80              # JPEG compression quality (1-100, lower = smaller)
+    use_compressed: true          # true = CompressedImage (JPEG), false = raw Image (BGR8)
+    jpeg_quality: 80              # JPEG compression quality (1-100, only when use_compressed=true)
     reconnect_delay_s: 3.0
     webcam_port_base: 8554     # webcam stream port (camera_1 gets +2)
 

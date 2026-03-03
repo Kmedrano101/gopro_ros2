@@ -1,7 +1,9 @@
 #include "gopro_ros2/gopro_stream.hpp"
 
 #include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/compressed_image.hpp>
+#include <cv_bridge/cv_bridge.h>
 #include <opencv2/videoio.hpp>
 #include <opencv2/imgcodecs.hpp>
 
@@ -20,7 +22,8 @@ struct CameraHandle
 {
     CameraConfig config;
     std::unique_ptr<GoProStreamManager> stream_mgr;
-    rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr publisher;
+    rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr compressed_pub;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr raw_pub;
     std::unique_ptr<cv::VideoCapture> capture;
 
     bool hw_decode{true};
@@ -42,6 +45,7 @@ public:
         declare_parameter("reconnect_delay_s", 3.0);
         declare_parameter("webcam_resolution", 12);  // 4=480p, 7=720p, 12=1080p
         declare_parameter("jpeg_quality", 80);
+        declare_parameter("use_compressed", true);
 
         target_fps_ = get_parameter("target_fps").as_int();
         hw_decode_ = get_parameter("use_hw_decode").as_bool();
@@ -50,6 +54,7 @@ public:
         reconnect_delay_s_ = get_parameter("reconnect_delay_s").as_double();
         webcam_resolution_ = get_parameter("webcam_resolution").as_int();
         jpeg_quality_ = get_parameter("jpeg_quality").as_int();
+        use_compressed_ = get_parameter("use_compressed").as_bool();
 
         discover_cameras();
 
@@ -94,9 +99,10 @@ public:
             });
 
         RCLCPP_INFO(get_logger(), "GoPro camera node started: %zu camera(s), "
-                     "target %d FPS, res=%d, jpeg_quality=%d, %zu reader threads",
+                     "target %d FPS, res=%d, compressed=%s (q=%d), %zu reader threads",
                      cameras_.size(), target_fps_, webcam_resolution_,
-                     jpeg_quality_, reader_threads_.size());
+                     use_compressed_ ? "true" : "false", jpeg_quality_,
+                     reader_threads_.size());
     }
 
     ~GoProCameraNode() override
@@ -163,22 +169,33 @@ private:
             auto qos = rclcpp::QoS(5)
                 .reliability(rclcpp::ReliabilityPolicy::Reliable)
                 .durability(rclcpp::DurabilityPolicy::Volatile);
-            auto publisher = create_publisher<sensor_msgs::msg::CompressedImage>(
-                "/gopro/camera_" + std::to_string(i) + "/image_raw/compressed",
-                qos);
 
             auto handle = std::make_unique<CameraHandle>();
             handle->config = cfg;
             handle->stream_mgr = std::move(stream_mgr);
-            handle->publisher = publisher;
             handle->hw_decode = hw_decode_;
             handle->mode = use_webcam_ ? StreamMode::WEBCAM : StreamMode::PREVIEW;
 
+            std::string topic_base = "/gopro/camera_" + std::to_string(i);
+            if (use_compressed_) {
+                handle->compressed_pub =
+                    create_publisher<sensor_msgs::msg::CompressedImage>(
+                        topic_base + "/image_raw/compressed", qos);
+            } else {
+                handle->raw_pub =
+                    create_publisher<sensor_msgs::msg::Image>(
+                        topic_base + "/image_raw", qos);
+            }
+
             cameras_.push_back(std::move(handle));
 
+            std::string topic = use_compressed_
+                ? topic_base + "/image_raw/compressed"
+                : topic_base + "/image_raw";
             RCLCPP_INFO(get_logger(),
-                "Configured %s (%s) -> UDP:%d -> /gopro/camera_%d/image_raw/compressed",
-                name.c_str(), ip.c_str(), static_cast<int>(port), i);
+                "Configured %s (%s) -> UDP:%d -> %s",
+                name.c_str(), ip.c_str(), static_cast<int>(port),
+                topic.c_str());
         }
     }
 
@@ -268,18 +285,27 @@ private:
                         consecutive_failures = 0;
                         cam.frame_count++;
 
-                        // JPEG-encode and publish as CompressedImage
-                        std::vector<uchar> buf;
-                        std::vector<int> params = {
-                            cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
-                        cv::imencode(".jpg", frame, buf, params);
+                        auto stamp = this->get_clock()->now();
+                        if (use_compressed_) {
+                            std::vector<uchar> buf;
+                            std::vector<int> params = {
+                                cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
+                            cv::imencode(".jpg", frame, buf, params);
 
-                        sensor_msgs::msg::CompressedImage msg;
-                        msg.header.stamp = this->get_clock()->now();
-                        msg.header.frame_id = cam.config.name;
-                        msg.format = "jpeg";
-                        msg.data = std::move(buf);
-                        cam.publisher->publish(msg);
+                            sensor_msgs::msg::CompressedImage msg;
+                            msg.header.stamp = stamp;
+                            msg.header.frame_id = cam.config.name;
+                            msg.format = "jpeg";
+                            msg.data = std::move(buf);
+                            cam.compressed_pub->publish(msg);
+                        } else {
+                            auto msg = cv_bridge::CvImage(
+                                std_msgs::msg::Header(), "bgr8", frame)
+                                .toImageMsg();
+                            msg->header.stamp = stamp;
+                            msg->header.frame_id = cam.config.name;
+                            cam.raw_pub->publish(*msg);
+                        }
                     } else {
                         consecutive_failures++;
                         need_reconnect =
@@ -339,6 +365,7 @@ private:
     double reconnect_delay_s_{3.0};
     int webcam_resolution_{12};
     int jpeg_quality_{80};
+    bool use_compressed_{true};
 
     std::vector<std::unique_ptr<CameraHandle>> cameras_;
     std::vector<std::thread> reader_threads_;
