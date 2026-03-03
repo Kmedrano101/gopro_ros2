@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+
+    <!-- Restrict DDS traffic to the real LAN interface so Docker bridges
+         don't steal the unicast data channel for large Image messages. -->
+    <transport_descriptors>
+        <transport_descriptor>
+            <transport_id>lan_udp</transport_id>
+            <type>UDPv4</type>
+            <interfaceWhiteList>
+                <address>192.168.1.132</address>
+            </interfaceWhiteList>
+            <sendBufferSize>8388608</sendBufferSize>
+            <receiveBufferSize>8388608</receiveBufferSize>
+            <maxMessageSize>65500</maxMessageSize>
+        </transport_descriptor>
+    </transport_descriptors>
+
+    <participant profile_name="desktop_participant" is_default_profile="true">
+        <rtps>
+            <userTransports>
+                <transport_id>lan_udp</transport_id>
+            </userTransports>
+            <useBuiltinTransports>false</useBuiltinTransports>
+        </rtps>
+    </participant>
+
+</profiles>

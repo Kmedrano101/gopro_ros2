@@ -2,7 +2,7 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
-#include <cv_bridge/cv_bridge.h>
+#include <cv_bridge/cv_bridge.hpp>
 #include <opencv2/videoio.hpp>
 
 #include <memory>
@@ -139,7 +139,8 @@ private:
                 cfg, keepalive_s_, log_info, log_warn);
 
             auto publisher = create_publisher<sensor_msgs::msg::Image>(
-                "/gopro/camera_" + std::to_string(i) + "/image_raw", 10);
+                "/gopro/camera_" + std::to_string(i) + "/image_raw",
+                rclcpp::SensorDataQoS());
 
             auto handle = std::make_unique<CameraHandle>();
             handle->config = cfg;
