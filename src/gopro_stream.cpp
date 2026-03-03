@@ -110,8 +110,10 @@ bool GoProStreamManager::start_stream(StreamMode mode)
         http_get("http://" + config_.ip + ":8080/gopro/webcam/exit", 5000);
 
         url = "http://" + config_.ip + ":8080/gopro/webcam/start?port=" +
-              std::to_string(config_.udp_port);
-        log_info_("[" + config_.name + "] Starting webcam stream -> UDP port " +
+              std::to_string(config_.udp_port) +
+              "&res=" + std::to_string(config_.resolution);
+        log_info_("[" + config_.name + "] Starting webcam stream (res=" +
+                  std::to_string(config_.resolution) + ") -> UDP port " +
                   std::to_string(config_.udp_port));
     } else {
         url = "http://" + config_.ip + ":8080/gopro/camera/stream/start?port=" +

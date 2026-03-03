@@ -15,6 +15,7 @@ struct CameraConfig
     std::string serial;
     int udp_port{8554};
     int index{0};
+    int resolution{12};  // webcam API res: 4=480p, 7=720p, 12=1080p
 };
 
 enum class StreamMode

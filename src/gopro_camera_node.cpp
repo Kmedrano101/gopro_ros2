@@ -1,9 +1,9 @@
 #include "gopro_ros2/gopro_stream.hpp"
 
 #include <rclcpp/rclcpp.hpp>
-#include <sensor_msgs/msg/image.hpp>
-#include <cv_bridge/cv_bridge.hpp>
+#include <sensor_msgs/msg/compressed_image.hpp>
 #include <opencv2/videoio.hpp>
+#include <opencv2/imgcodecs.hpp>
 
 #include <memory>
 #include <vector>
@@ -20,7 +20,7 @@ struct CameraHandle
 {
     CameraConfig config;
     std::unique_ptr<GoProStreamManager> stream_mgr;
-    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr publisher;
+    rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr publisher;
     std::unique_ptr<cv::VideoCapture> capture;
 
     bool hw_decode{true};
@@ -40,12 +40,16 @@ public:
         declare_parameter("use_webcam_api", true);
         declare_parameter("keepalive_interval_s", 2.0);
         declare_parameter("reconnect_delay_s", 3.0);
+        declare_parameter("webcam_resolution", 12);  // 4=480p, 7=720p, 12=1080p
+        declare_parameter("jpeg_quality", 80);
 
         target_fps_ = get_parameter("target_fps").as_int();
         hw_decode_ = get_parameter("use_hw_decode").as_bool();
         use_webcam_ = get_parameter("use_webcam_api").as_bool();
         keepalive_s_ = get_parameter("keepalive_interval_s").as_double();
         reconnect_delay_s_ = get_parameter("reconnect_delay_s").as_double();
+        webcam_resolution_ = get_parameter("webcam_resolution").as_int();
+        jpeg_quality_ = get_parameter("jpeg_quality").as_int();
 
         discover_cameras();
 
@@ -73,9 +77,26 @@ public:
             });
         }
 
+        // Hz monitoring timer — log publish rate every 5 seconds
+        prev_frame_counts_.resize(cameras_.size(), 0);
+        hz_timer_ = create_wall_timer(
+            std::chrono::seconds(5),
+            [this]() {
+                for (size_t i = 0; i < cameras_.size(); ++i) {
+                    uint64_t current = cameras_[i]->frame_count.load();
+                    uint64_t delta = current - prev_frame_counts_[i];
+                    double hz = static_cast<double>(delta) / 5.0;
+                    prev_frame_counts_[i] = current;
+                    RCLCPP_INFO(get_logger(),
+                        "[%s] publish rate: %.1f Hz (total: %lu frames)",
+                        cameras_[i]->config.name.c_str(), hz, current);
+                }
+            });
+
         RCLCPP_INFO(get_logger(), "GoPro camera node started: %zu camera(s), "
-                     "target %d FPS, %zu reader threads",
-                     cameras_.size(), target_fps_, reader_threads_.size());
+                     "target %d FPS, res=%d, jpeg_quality=%d, %zu reader threads",
+                     cameras_.size(), target_fps_, webcam_resolution_,
+                     jpeg_quality_, reader_threads_.size());
     }
 
     ~GoProCameraNode() override
@@ -127,6 +148,7 @@ private:
             cfg.serial = serial;
             cfg.udp_port = static_cast<int>(port);
             cfg.index = i;
+            cfg.resolution = webcam_resolution_;
 
             auto log_info = [this](const std::string& msg) {
                 RCLCPP_INFO(get_logger(), "%s", msg.c_str());
@@ -141,8 +163,8 @@ private:
             auto qos = rclcpp::QoS(5)
                 .reliability(rclcpp::ReliabilityPolicy::Reliable)
                 .durability(rclcpp::DurabilityPolicy::Volatile);
-            auto publisher = create_publisher<sensor_msgs::msg::Image>(
-                "/gopro/camera_" + std::to_string(i) + "/image_raw",
+            auto publisher = create_publisher<sensor_msgs::msg::CompressedImage>(
+                "/gopro/camera_" + std::to_string(i) + "/image_raw/compressed",
                 qos);
 
             auto handle = std::make_unique<CameraHandle>();
@@ -155,7 +177,7 @@ private:
             cameras_.push_back(std::move(handle));
 
             RCLCPP_INFO(get_logger(),
-                "Configured %s (%s) -> UDP:%d -> /gopro/camera_%d/image_raw",
+                "Configured %s (%s) -> UDP:%d -> /gopro/camera_%d/image_raw/compressed",
                 name.c_str(), ip.c_str(), static_cast<int>(port), i);
         }
     }
@@ -246,12 +268,18 @@ private:
                         consecutive_failures = 0;
                         cam.frame_count++;
 
-                        // Publish directly — cv_bridge creates the message
-                        auto msg = cv_bridge::CvImage(
-                            std_msgs::msg::Header(), "bgr8", frame).toImageMsg();
-                        msg->header.stamp = this->get_clock()->now();
-                        msg->header.frame_id = cam.config.name;
-                        cam.publisher->publish(*msg);
+                        // JPEG-encode and publish as CompressedImage
+                        std::vector<uchar> buf;
+                        std::vector<int> params = {
+                            cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
+                        cv::imencode(".jpg", frame, buf, params);
+
+                        sensor_msgs::msg::CompressedImage msg;
+                        msg.header.stamp = this->get_clock()->now();
+                        msg.header.frame_id = cam.config.name;
+                        msg.format = "jpeg";
+                        msg.data = std::move(buf);
+                        cam.publisher->publish(msg);
                     } else {
                         consecutive_failures++;
                         need_reconnect =
@@ -309,10 +337,16 @@ private:
     bool use_webcam_{true};
     double keepalive_s_{2.0};
     double reconnect_delay_s_{3.0};
+    int webcam_resolution_{12};
+    int jpeg_quality_{80};
 
     std::vector<std::unique_ptr<CameraHandle>> cameras_;
     std::vector<std::thread> reader_threads_;
     std::atomic<bool> shutting_down_{false};
+
+    // Hz monitoring
+    rclcpp::TimerBase::SharedPtr hz_timer_;
+    std::vector<uint64_t> prev_frame_counts_;
 };
 
 }  // namespace gopro_ros2

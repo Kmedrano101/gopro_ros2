@@ -27,6 +27,7 @@ Streams video from multiple GoPro cameras connected via **USB-C** and publishes 
 - **♻️ Auto-reconnect** — re-initializes stream and GStreamer pipeline on connection loss
 - **💓 Keepalive** — background thread pings the camera HTTP API to prevent stream timeout
 - **🎯 Webcam API with fallback** — tries the Webcam API (H.264/1080p) first, falls back to Preview Stream (H.265) automatically
+- **📊 Built-in Hz monitoring** — logs per-camera publish rate every 5 seconds for live performance tracking
 
 ## 📐 Architecture
 
@@ -166,7 +167,11 @@ ros2 launch gopro_ros2 gopro_cameras.launch.py
 # Check topics are publishing
 ros2 topic list | grep gopro
 
-# Measure frame rate
+# The node logs publish rate automatically every 5 seconds:
+#   [gopro_front] publish rate: 14.8 Hz (total: 1482 frames)
+#   [gopro_back]  publish rate: 15.0 Hz (total: 1500 frames)
+
+# You can also measure externally:
 ros2 topic hz /gopro/camera_0/image_raw
 ros2 topic hz /gopro/camera_1/image_raw
 
@@ -184,6 +189,7 @@ gopro_cameras:
     target_fps: 15              # Target publish rate per camera
     use_hw_decode: true         # Use nvv4l2decoder (Jetson HW accel)
     use_webcam_api: true        # Try Webcam API first (H.264), fallback to Preview (H.265)
+    webcam_resolution: 12       # Webcam API resolution: 4=480p, 7=720p, 12=1080p
     keepalive_interval_s: 2.0   # HTTP keepalive ping interval
     reconnect_delay_s: 3.0      # Wait before reconnecting after failure
 
@@ -207,6 +213,7 @@ gopro_cameras:
 | `target_fps` | int | 15 | Target frame rate per camera |
 | `use_hw_decode` | bool | true | Use NVIDIA HW decoder (falls back to SW) |
 | `use_webcam_api` | bool | true | Try Webcam API before Preview Stream |
+| `webcam_resolution` | int | 12 | Webcam API resolution (`4`=480p, `7`=720p, `12`=1080p) |
 | `keepalive_interval_s` | double | 2.0 | Keepalive HTTP request interval |
 | `reconnect_delay_s` | double | 3.0 | Delay before reconnection attempt |
 
@@ -326,8 +333,9 @@ python3 -c "import cv2; print(cv2.getBuildInformation())" | grep GStreamer
 <details>
 <summary><b>Low frame rate</b></summary>
 
-- Set both cameras to **1080p** (`setting=2, option=9`) for balanced throughput
+- Ensure `webcam_resolution: 12` (1080p) so all cameras stream at the same resolution
 - Ensure `use_hw_decode: true` — software decode is significantly slower
+- Check the built-in Hz logs to identify which camera is underperforming
 - Check CPU/GPU load with `tegrastats` (Jetson) or `htop`
 
 </details>

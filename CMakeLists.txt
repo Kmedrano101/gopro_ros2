@@ -13,17 +13,15 @@ add_compile_options(-Wall -Wextra -O3)
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
-find_package(cv_bridge REQUIRED)
 find_package(image_transport REQUIRED)
 
 # System dependencies
-find_package(OpenCV REQUIRED COMPONENTS core imgproc videoio)
+find_package(OpenCV REQUIRED COMPONENTS core imgproc videoio imgcodecs)
 find_package(CURL REQUIRED)
 
 set(ROS_DEPS
   rclcpp
   sensor_msgs
-  cv_bridge
   image_transport
 )
 

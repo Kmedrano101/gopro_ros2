@@ -39,14 +39,14 @@ def generate_launch_description():
         package='rqt_image_view',
         executable='rqt_image_view',
         name='image_view_front',
-        arguments=['/gopro/camera_0/image_raw'],
+        arguments=['/gopro/camera_0/image_raw/compressed'],
     )
 
     image_view_back = Node(
         package='rqt_image_view',
         executable='rqt_image_view',
         name='image_view_back',
-        arguments=['/gopro/camera_1/image_raw'],
+        arguments=['/gopro/camera_1/image_raw/compressed'],
     )
 
     return LaunchDescription([
