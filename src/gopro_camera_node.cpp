@@ -1,6 +1,9 @@
 #include "gopro_ros2/gopro_stream.hpp"
 
 #include <rclcpp/rclcpp.hpp>
+#include <rclcpp_lifecycle/lifecycle_node.hpp>
+#include <lifecycle_msgs/msg/state.hpp>
+#include <lifecycle_msgs/msg/transition.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/compressed_image.hpp>
 #include <cv_bridge/cv_bridge.h>
@@ -22,8 +25,8 @@ struct CameraHandle
 {
     CameraConfig config;
     std::unique_ptr<GoProStreamManager> stream_mgr;
-    rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr compressed_pub;
-    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr raw_pub;
+    rclcpp_lifecycle::LifecyclePublisher<sensor_msgs::msg::CompressedImage>::SharedPtr compressed_pub;
+    rclcpp_lifecycle::LifecyclePublisher<sensor_msgs::msg::Image>::SharedPtr raw_pub;
     std::unique_ptr<cv::VideoCapture> capture;
 
     bool hw_decode{true};
@@ -32,11 +35,13 @@ struct CameraHandle
     std::mutex mtx;  // protects capture
 };
 
-class GoProCameraNode : public rclcpp::Node
+class GoProCameraNode : public rclcpp_lifecycle::LifecycleNode
 {
 public:
+    using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
+
     GoProCameraNode()
-        : Node("gopro_cameras")
+        : LifecycleNode("gopro_cameras")
     {
         declare_parameter("target_fps", 15);
         declare_parameter("use_hw_decode", true);
@@ -46,6 +51,48 @@ public:
         declare_parameter("webcam_resolution", 12);  // 4=480p, 7=720p, 12=1080p
         declare_parameter("jpeg_quality", 80);
         declare_parameter("use_compressed", true);
+
+        // Auto-transition: configure then activate (matching Livox pattern)
+        RCLCPP_INFO(get_logger(), "Auto-transitioning to active state...");
+
+        auto configure_ret = trigger_transition(
+            lifecycle_msgs::msg::Transition::TRANSITION_CONFIGURE);
+        if (configure_ret.id() != lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE) {
+            throw std::runtime_error("Failed to auto-configure");
+        }
+
+        auto activate_ret = trigger_transition(
+            lifecycle_msgs::msg::Transition::TRANSITION_ACTIVATE);
+        if (activate_ret.id() != lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE) {
+            throw std::runtime_error("Failed to auto-activate");
+        }
+
+        RCLCPP_INFO(get_logger(), "Lifecycle auto-transition complete (active).");
+    }
+
+    ~GoProCameraNode() override
+    {
+        RCLCPP_INFO(get_logger(), "Destroying GoPro camera node...");
+        // Safety net: if still active, stop everything
+        if (active_.load()) {
+            active_ = false;
+            for (auto& t : reader_threads_) {
+                if (t.joinable()) t.join();
+            }
+            for (auto& cam : cameras_) {
+                std::lock_guard<std::mutex> lock(cam->mtx);
+                if (cam->capture) {
+                    cam->capture->release();
+                    cam->capture.reset();
+                }
+                cam->stream_mgr->stop_stream();
+            }
+        }
+    }
+
+    CallbackReturn on_configure(const rclcpp_lifecycle::State& /*previous_state*/) override
+    {
+        RCLCPP_INFO(get_logger(), "Configuring...");
 
         target_fps_ = get_parameter("target_fps").as_int();
         hw_decode_ = get_parameter("use_hw_decode").as_bool();
@@ -60,8 +107,17 @@ public:
 
         if (cameras_.empty()) {
             RCLCPP_ERROR(get_logger(), "No cameras configured! Check parameters.");
-            return;
+            return CallbackReturn::FAILURE;
         }
+
+        RCLCPP_INFO(get_logger(), "Configured %zu camera(s).", cameras_.size());
+        return CallbackReturn::SUCCESS;
+    }
+
+    CallbackReturn on_activate(const rclcpp_lifecycle::State& /*previous_state*/) override
+    {
+        RCLCPP_INFO(get_logger(), "Activating...");
+        active_ = true;
 
         // Start each camera in its own thread (stream init + pipeline open)
         std::vector<std::thread> start_threads;
@@ -98,23 +154,30 @@ public:
                 }
             });
 
-        RCLCPP_INFO(get_logger(), "GoPro camera node started: %zu camera(s), "
+        RCLCPP_INFO(get_logger(), "GoPro camera node activated: %zu camera(s), "
                      "target %d FPS, res=%d, compressed=%s (q=%d), %zu reader threads",
                      cameras_.size(), target_fps_, webcam_resolution_,
                      use_compressed_ ? "true" : "false", jpeg_quality_,
                      reader_threads_.size());
+
+        return CallbackReturn::SUCCESS;
     }
 
-    ~GoProCameraNode() override
+    CallbackReturn on_deactivate(const rclcpp_lifecycle::State& /*previous_state*/) override
     {
-        RCLCPP_INFO(get_logger(), "Shutting down GoPro camera node...");
-        shutting_down_ = true;
+        RCLCPP_INFO(get_logger(), "Deactivating...");
+        active_ = false;
 
         // Join reader threads
         for (auto& t : reader_threads_) {
             if (t.joinable()) t.join();
         }
+        reader_threads_.clear();
 
+        // Cancel hz timer
+        hz_timer_.reset();
+
+        // Release captures and stop streams
         for (auto& cam : cameras_) {
             RCLCPP_INFO(get_logger(), "[%s] Stopping (published %lu frames)",
                          cam->config.name.c_str(),
@@ -127,7 +190,40 @@ public:
                 }
             }
             cam->stream_mgr->stop_stream();
+            cam->frame_count = 0;
+
+            // Reset publishers so they stop publishing in inactive state
+            if (cam->compressed_pub) cam->compressed_pub.reset();
+            if (cam->raw_pub) cam->raw_pub.reset();
         }
+
+        RCLCPP_INFO(get_logger(), "Deactivated.");
+        return CallbackReturn::SUCCESS;
+    }
+
+    CallbackReturn on_cleanup(const rclcpp_lifecycle::State& /*previous_state*/) override
+    {
+        RCLCPP_INFO(get_logger(), "Cleaning up...");
+        cameras_.clear();
+        prev_frame_counts_.clear();
+        RCLCPP_INFO(get_logger(), "Cleaned up.");
+        return CallbackReturn::SUCCESS;
+    }
+
+    CallbackReturn on_shutdown(const rclcpp_lifecycle::State& previous_state) override
+    {
+        RCLCPP_INFO(get_logger(), "Shutting down...");
+
+        if (previous_state.id() == lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE) {
+            on_deactivate(previous_state);
+        }
+        if (previous_state.id() == lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE ||
+            previous_state.id() == lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE) {
+            on_cleanup(previous_state);
+        }
+
+        RCLCPP_INFO(get_logger(), "Shut down complete.");
+        return CallbackReturn::SUCCESS;
     }
 
 private:
@@ -270,7 +366,7 @@ private:
         RCLCPP_INFO(get_logger(), "[%s] Reader thread started",
                      cam.config.name.c_str());
 
-        while (!shutting_down_) {
+        while (active_.load()) {
             bool need_reconnect = false;
 
             {
@@ -369,7 +465,7 @@ private:
 
     std::vector<std::unique_ptr<CameraHandle>> cameras_;
     std::vector<std::thread> reader_threads_;
-    std::atomic<bool> shutting_down_{false};
+    std::atomic<bool> active_{false};
 
     // Hz monitoring
     rclcpp::TimerBase::SharedPtr hz_timer_;
@@ -382,7 +478,7 @@ int main(int argc, char** argv)
 {
     rclcpp::init(argc, argv);
     auto node = std::make_shared<gopro_ros2::GoProCameraNode>();
-    rclcpp::spin(node);
+    rclcpp::spin(node->get_node_base_interface());
     rclcpp::shutdown();
     return 0;
 }

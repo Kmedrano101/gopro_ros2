@@ -15,6 +15,7 @@ find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(image_transport REQUIRED)
+find_package(rclcpp_lifecycle REQUIRED)
 
 # System dependencies
 find_package(OpenCV REQUIRED COMPONENTS core imgproc videoio imgcodecs)
@@ -25,6 +26,7 @@ set(ROS_DEPS
   sensor_msgs
   cv_bridge
   image_transport
+  rclcpp_lifecycle
 )
 
 # GoPro camera node
