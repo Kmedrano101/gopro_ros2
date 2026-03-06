@@ -1,4 +1,4 @@
-gopro_cameras:
+gopro_driver:
   ros__parameters:
     target_fps: 15
     use_hw_decode: true

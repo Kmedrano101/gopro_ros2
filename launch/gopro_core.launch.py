@@ -16,7 +16,7 @@ def generate_launch_description():
     gopro_node = Node(
         package='gopro_ros2',
         executable='gopro_camera_node',
-        name='gopro_cameras',
+        name='gopro_driver',
         parameters=[config_file],
         output='screen',
     )

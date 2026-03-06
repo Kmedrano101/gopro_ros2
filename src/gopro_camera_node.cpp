@@ -25,13 +25,14 @@ struct CameraHandle
 {
     CameraConfig config;
     std::unique_ptr<GoProStreamManager> stream_mgr;
-    rclcpp_lifecycle::LifecyclePublisher<sensor_msgs::msg::CompressedImage>::SharedPtr compressed_pub;
-    rclcpp_lifecycle::LifecyclePublisher<sensor_msgs::msg::Image>::SharedPtr raw_pub;
+    rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr compressed_pub;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr raw_pub;
     std::unique_ptr<cv::VideoCapture> capture;
 
     bool hw_decode{true};
     StreamMode mode{StreamMode::WEBCAM};
     std::atomic<uint64_t> frame_count{0};
+    std::atomic<bool> stall_reconnect{false};  // set by Hz timer on stall
     std::mutex mtx;  // protects capture
 };
 
@@ -41,7 +42,7 @@ public:
     using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
 
     GoProCameraNode()
-        : LifecycleNode("gopro_cameras")
+        : LifecycleNode("gopro_driver")
     {
         declare_parameter("target_fps", 15);
         declare_parameter("use_hw_decode", true);
@@ -51,23 +52,6 @@ public:
         declare_parameter("webcam_resolution", 12);  // 4=480p, 7=720p, 12=1080p
         declare_parameter("jpeg_quality", 80);
         declare_parameter("use_compressed", true);
-
-        // Auto-transition: configure then activate (matching Livox pattern)
-        RCLCPP_INFO(get_logger(), "Auto-transitioning to active state...");
-
-        auto configure_ret = trigger_transition(
-            lifecycle_msgs::msg::Transition::TRANSITION_CONFIGURE);
-        if (configure_ret.id() != lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE) {
-            throw std::runtime_error("Failed to auto-configure");
-        }
-
-        auto activate_ret = trigger_transition(
-            lifecycle_msgs::msg::Transition::TRANSITION_ACTIVATE);
-        if (activate_ret.id() != lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE) {
-            throw std::runtime_error("Failed to auto-activate");
-        }
-
-        RCLCPP_INFO(get_logger(), "Lifecycle auto-transition complete (active).");
     }
 
     ~GoProCameraNode() override
@@ -119,7 +103,22 @@ public:
         RCLCPP_INFO(get_logger(), "Activating...");
         active_ = true;
 
-        // Start each camera in its own thread (stream init + pipeline open)
+        // Create publishers (topics only exist while active)
+        auto qos = rclcpp::SensorDataQoS();
+        for (auto& cam : cameras_) {
+            std::string topic_base = "/gopro/camera_" + std::to_string(cam->config.index);
+            if (use_compressed_) {
+                cam->compressed_pub =
+                    create_publisher<sensor_msgs::msg::CompressedImage>(
+                        topic_base + "/image_raw/compressed", qos);
+            } else {
+                cam->raw_pub =
+                    create_publisher<sensor_msgs::msg::Image>(
+                        topic_base + "/image_raw", qos);
+            }
+        }
+
+        // Start each camera stream in parallel
         std::vector<std::thread> start_threads;
         for (auto& cam : cameras_) {
             start_threads.emplace_back([this, &cam]() {
@@ -151,10 +150,18 @@ public:
                     RCLCPP_INFO(get_logger(),
                         "[%s] publish rate: %.1f Hz (total: %lu frames)",
                         cameras_[i]->config.name.c_str(), hz, current);
+
+                    // Stall detection: 0 new frames in 5s while pipeline exists
+                    if (delta == 0 && current > 0 && cameras_[i]->capture) {
+                        RCLCPP_WARN(get_logger(),
+                            "[%s] Stall detected (0 Hz), triggering reconnect",
+                            cameras_[i]->config.name.c_str());
+                        cameras_[i]->stall_reconnect.store(true);
+                    }
                 }
             });
 
-        RCLCPP_INFO(get_logger(), "GoPro camera node activated: %zu camera(s), "
+        RCLCPP_INFO(get_logger(), "Activated: %zu camera(s), "
                      "target %d FPS, res=%d, compressed=%s (q=%d), %zu reader threads",
                      cameras_.size(), target_fps_, webcam_resolution_,
                      use_compressed_ ? "true" : "false", jpeg_quality_,
@@ -262,29 +269,15 @@ private:
             auto stream_mgr = std::make_unique<GoProStreamManager>(
                 cfg, keepalive_s_, log_info, log_warn);
 
-            auto qos = rclcpp::QoS(5)
-                .reliability(rclcpp::ReliabilityPolicy::Reliable)
-                .durability(rclcpp::DurabilityPolicy::Volatile);
-
             auto handle = std::make_unique<CameraHandle>();
             handle->config = cfg;
             handle->stream_mgr = std::move(stream_mgr);
             handle->hw_decode = hw_decode_;
             handle->mode = use_webcam_ ? StreamMode::WEBCAM : StreamMode::PREVIEW;
 
-            std::string topic_base = "/gopro/camera_" + std::to_string(i);
-            if (use_compressed_) {
-                handle->compressed_pub =
-                    create_publisher<sensor_msgs::msg::CompressedImage>(
-                        topic_base + "/image_raw/compressed", qos);
-            } else {
-                handle->raw_pub =
-                    create_publisher<sensor_msgs::msg::Image>(
-                        topic_base + "/image_raw", qos);
-            }
-
             cameras_.push_back(std::move(handle));
 
+            std::string topic_base = "/gopro/camera_" + std::to_string(i);
             std::string topic = use_compressed_
                 ? topic_base + "/image_raw/compressed"
                 : topic_base + "/image_raw";
@@ -369,12 +362,19 @@ private:
         while (active_.load()) {
             bool need_reconnect = false;
 
+            // Check stall flag from Hz monitor
+            if (cam.stall_reconnect.exchange(false)) {
+                need_reconnect = true;
+            }
+
             {
                 std::lock_guard<std::mutex> lock(cam.mtx);
 
                 if (!cam.capture || !cam.capture->isOpened()) {
                     consecutive_failures++;
                     need_reconnect = (consecutive_failures == 1);
+                } else if (need_reconnect) {
+                    // Stall detected by Hz timer — skip read, go to reconnect
                 } else {
                     cv::Mat frame;
                     if (cam.capture->read(frame) && !frame.empty()) {
@@ -467,7 +467,7 @@ private:
     std::vector<std::thread> reader_threads_;
     std::atomic<bool> active_{false};
 
-    // Hz monitoring
+    // Timers
     rclcpp::TimerBase::SharedPtr hz_timer_;
     std::vector<uint64_t> prev_frame_counts_;
 };
@@ -478,6 +478,16 @@ int main(int argc, char** argv)
 {
     rclcpp::init(argc, argv);
     auto node = std::make_shared<gopro_ros2::GoProCameraNode>();
+
+    // Auto-transition: unconfigured -> configured -> active
+    // on_configure() discovers cameras, on_activate() creates publishers + starts streams
+    RCLCPP_INFO(node->get_logger(), "Auto-transitioning to active state...");
+
+    node->trigger_transition(
+        lifecycle_msgs::msg::Transition::TRANSITION_CONFIGURE);
+    node->trigger_transition(
+        lifecycle_msgs::msg::Transition::TRANSITION_ACTIVATE);
+
     rclcpp::spin(node->get_node_base_interface());
     rclcpp::shutdown();
     return 0;
