@@ -106,7 +106,34 @@ ping -c1 172.22.152.51   # Front camera
 ping -c1 172.21.106.51   # Back camera
 ```
 
-### 2. Configure cameras
+### 2. Find each camera's serial number & IP
+
+If you don't already know a camera's serial (e.g. it's a new unit, or you can't
+tell which physical camera is which), query it directly over USB with
+[`open-gopro`](https://github.com/gopro/OpenGoPro):
+
+```bash
+pip install open-gopro
+python3 scripts/check_gopro.py
+```
+
+This connects to whichever camera responds first and prints its `serial_number`,
+`model_name`, and `firmware_version` — use the last 3 digits of the serial to
+compute its IP (`172.2X.1YZ.51`, see above).
+
+With **multiple cameras connected**, calling `check_gopro.py` with no arguments
+only ever returns one camera (it grabs the first to respond to mDNS discovery).
+To query each camera individually, pass the last 3+ digits of each one's serial:
+
+```bash
+python3 scripts/check_gopro.py 252 106
+# --- camera (252) ---
+# { "serial_number": "C3531350017252", ... }
+# --- camera (106) ---
+# { "serial_number": "C3531350027106", ... }
+```
+
+### 3. Configure cameras
 
 Edit the config file to match your camera IPs and serial numbers:
 
@@ -114,7 +141,7 @@ Edit the config file to match your camera IPs and serial numbers:
 nano ~/ros2_ws/src/gopro_ros2/config/gopro_cameras.yaml
 ```
 
-### 3. (Optional) Set camera properties via HTTP API
+### 4. (Optional) Set camera properties via HTTP API
 
 Before launching, you can configure camera settings. The settings API endpoint is:
 
@@ -156,13 +183,13 @@ done
 
 </details>
 
-### 4. Launch
+### 5. Launch
 
 ```bash
 ros2 launch gopro_ros2 gopro_cameras.launch.py
 ```
 
-### 5. Verify
+### 6. Verify
 
 ```bash
 # Check topics are publishing
@@ -284,6 +311,8 @@ gopro_ros2/
 │   └── gopro_cameras.launch.py
 ├── rviz/
 │   └── gopro_cameras.rviz        # RViz config for both cameras
+├── scripts/
+│   └── check_gopro.py            # Query camera serial/model/firmware over USB
 └── src/
     ├── gopro_camera_node.cpp     # ROS2 node with per-camera reader threads
     └── gopro_stream.cpp          # GoPro HTTP API (libcurl) + GStreamer pipelines
