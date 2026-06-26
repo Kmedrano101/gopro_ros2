@@ -101,10 +101,15 @@ Each GoPro connected via USB-C creates a CDC-NCM network interface. The camera I
 # Check USB network interfaces
 ip a | grep usb
 
-# Ping your cameras
-ping -c1 172.22.152.51   # Front camera
-ping -c1 172.21.106.51   # Back camera
+# Verify cameras respond on HTTP port 8080 (GoPro does not respond to ping)
+curl -o /dev/null -s -w "Front: HTTP %{http_code} in %{time_connect}s\n" http://172.22.152.51:8080/gopro/camera/info
+curl -o /dev/null -s -w "Back:  HTTP %{http_code} in %{time_connect}s\n" http://172.21.106.51:8080/gopro/camera/info
 ```
+
+> **Note:** GoPro cameras do not reply to ICMP echo (ping). They return
+> "Destination Port Unreachable" instead of an echo reply, even when the
+> connection is healthy. Use `curl` to verify reachability. A `200` response
+> confirms the camera is up and the driver will be able to reach it.
 
 ### 2. Find each camera's serial number & IP
 
